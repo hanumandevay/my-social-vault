@@ -3,18 +3,19 @@ import os, sys, json, hashlib
 from datetime import datetime
 from streamlit.web import cli as stcli
 
-# --- 1. AUTO-LAUNCHER ---
+# --- 1. AUTO-LAUNCHER (Works on Local & Cloud) ---
 if __name__ == "__main__":
     if not st.runtime.exists():
         sys.argv = ["streamlit", "run", os.path.abspath(__file__)]
         sys.exit(stcli.main())
 
-# --- 2. STORAGE SETUP ---
-BASE_DIR = r"C:\Users\hanum\Desktop\App Project\My File Sharing"
-VAULT, PENDING = os.path.join(BASE_DIR, "public_vault"), os.path.join(BASE_DIR, "pending_files")
+# --- 2. CLOUD STORAGE SETUP ---
+# On the Cloud, we use relative paths (no C:\ drive)
+VAULT, PENDING = "public_vault", "pending_files"
 AUTH_FILE, DB_FILE, SOCIAL_FILE = "user_auth.json", "file_info.json", "social_data.json"
 
-for p in [VAULT, PENDING]: os.makedirs(p, exist_ok=True)
+for p in [VAULT, PENDING]: 
+    if not os.path.exists(p): os.makedirs(p)
 
 def load_data(file, default):
     if os.path.exists(file):
@@ -35,7 +36,7 @@ users = load_data(AUTH_FILE, {})
 db = load_data(DB_FILE, {})
 social = load_data(SOCIAL_FILE, {})
 
-# FIX FOR KeyError: Automatically add missing keys to social data
+# Fix for KeyError: Automatically add missing keys
 for key in ["likes", "chats", "followers", "msgs"]:
     if key not in social: social[key] = {}
 
@@ -51,7 +52,7 @@ if not st.session_state.auth:
         st.subheader("New Registration")
         r_id = st.text_input("9-Digit ID:", max_chars=9, key="reg_id")
         r_name = st.text_input("Full Name:", key="reg_name")
-        r_role = st.selectbox("Role:", ["Admin", "Me", "Guest"], key="reg_role")
+        r_role = st.selectbox("Register As:", ["Admin", "Me", "Guest"], key="reg_role")
         r_key = st.text_input("Secret Code:", type="password", key="reg_k") if r_role != "Guest" else ""
         r_pass = st.text_input("Set Private Password:", type="password", key="reg_p")
         
@@ -78,9 +79,7 @@ if not st.session_state.auth:
         col1, col2 = st.columns(2)
         if col1.button("Apply Changes"):
             if c_id in users and users[c_id]["password"] == hash_pass(c_pass):
-                if tick_n and new_n:
-                    if new_n == users[c_id]["name"]: st.warning("Name is same!")
-                    else: users[c_id]["name"] = new_n
+                if tick_n and new_n: users[c_id]["name"] = new_n
                 if tick_p and new_p: users[c_id]["password"] = hash_pass(new_p)
                 save_data(AUTH_FILE, users); st.success("✅ Updated!")
             else: st.error("Invalid ID/Password")
@@ -95,16 +94,15 @@ if not st.session_state.auth:
 
     with t1:
         st.subheader("Login")
-        l_id = st.text_input("ID:", key="l_id")
-        l_p = st.text_input("Password:", type="password", key="l_p")
+        l_id = st.text_input("Enter ID:", key="l_id")
+        l_p = st.text_input("Private Password:", type="password", key="l_p")
         if st.button("Login"):
             if l_id in users and users[l_id]["password"] == hash_pass(l_p):
                 u = users[l_id]
-                # Fix for old accounts missing 'roles' key
                 u_roles = u.get("roles", ["Guest"])
                 st.session_state.update({"auth": True, "username": u["name"], "uid": l_id, "all_roles": u_roles, "active_role": u_roles[0]})
                 st.rerun()
-            else: st.error("Invalid ID or Password.")
+            else: st.error("❌ Invalid ID or Password.")
     st.stop()
 
 # --- 5. SIDEBAR (NAVIGATION & MESSENGER) ---
@@ -119,12 +117,13 @@ with st.sidebar:
     
     st.divider()
     st.subheader("📩 Messenger")
-    chat_with = st.selectbox("Chat with:", [f"{uid} ({users[uid]['name']})" for uid in users if uid != st.session_state.uid])
+    chat_list = [f"{uid} ({users[uid]['name']})" for uid in users if uid != st.session_state.uid]
+    chat_with = st.selectbox("Chat with:", chat_list) if chat_list else None
+    
     if chat_with:
         target_id = chat_with.split(" (")[0]
         chat_key = "-".join(sorted([st.session_state.uid, target_id]))
         
-        # SAFE MESSAGE LOADING
         chat_history = social["msgs"].get(chat_key, [])
         for m in chat_history:
             st.caption(f"**{m['s']}**: {m['t']}")
@@ -136,7 +135,8 @@ with st.sidebar:
             save_data(SOCIAL_FILE, social); st.rerun()
 
     st.divider()
-    if st.button("Logout", use_container_width=True): st.session_state.auth = False; st.rerun()
+    if st.button("Logout", use_container_width=True): 
+        st.session_state.auth = False; st.rerun()
 
 # --- 6. PAGE LOGIC ---
 if st.session_state.active_tab == "🏠 My Dashboard":
@@ -149,7 +149,7 @@ if st.session_state.active_tab == "🏠 My Dashboard":
             with open(f_path, "wb") as b: b.write(up.getbuffer())
             fid = hashlib.md5(up.name.encode()).hexdigest()
             db[fid] = {"n": up.name, "u": st.session_state.username, "uid": st.session_state.uid, "s": "pending"}
-            save_data(DB_FILE, db); st.success("Sent for approval!")
+            save_data(DB_FILE, db); st.toast("Sent for approval!")
 
     st.subheader("🖼️ My Posts")
     my_posts = [fid for fid, info in db.items() if info.get("uid") == st.session_state.uid and info.get("s") == "approved"]
@@ -164,7 +164,6 @@ if st.session_state.active_tab == "🏠 My Dashboard":
 
 else:
     st.header("🌎 Social Feed")
-    # Follow people section
     with st.expander("🔍 Find People"):
         for uid, uinfo in users.items():
             if uid != st.session_state.uid:
@@ -176,7 +175,6 @@ else:
                         social["followers"][uid].append(st.session_state.uid)
                         save_data(SOCIAL_FILE, social); st.rerun()
 
-    # News Feed
     approved = [fid for fid, info in db.items() if info.get("s") == "approved" and not info["n"].lower().endswith('.json')]
     for fid in reversed(approved):
         info = db[fid]
@@ -201,11 +199,12 @@ else:
                         save_data(SOCIAL_FILE, social); st.rerun()
 
 # --- ADMIN PANEL ---
-if st.session_state.get("active_role") == "Admin":
+if "Admin" in st.session_state.all_roles:
     with st.sidebar.expander("🛠️ Admin Tools"):
         for fid, info in list(db.items()):
             if info["s"] == "pending":
                 st.write(f"📄 {info['n']} - {info['u']}")
                 if st.button("Approve", key=f"adm_{fid}"):
-                    os.rename(os.path.join(PENDING, info['n']), os.path.join(VAULT, info['n']))
+                    if os.path.exists(os.path.join(PENDING, info['n'])):
+                        os.rename(os.path.join(PENDING, info['n']), os.path.join(VAULT, info['n']))
                     db[fid]["s"] = "approved"; save_data(DB_FILE, db); st.rerun()
