@@ -1,38 +1,60 @@
 import streamlit as st
-from streamlit_gsheets import GSheetsConnection
 import pandas as pd
-import hashlib, os
+import gspread
+from google.oauth2.service_account import Credentials
+import hashlib, os, datetime
 
-# --- 1. CLOUD CONNECTION (FIXED FOR SECRETS ERROR) ---
-def get_safe_connection():
+# --- 1. SUPER-SAFE CLOUD CONNECTION ---
+def get_gspread_client():
     try:
-        # We pull the key, clean it, and pass it directly to the connection
-        if "connections" in st.secrets and "gsheets" in st.secrets.connections:
-            s_dict = st.secrets.connections.gsheets
-            raw_key = s_dict.get("private_key", "")
-            
-            # Clean the key for Byte 92 and Padding errors
-            cleaned_key = raw_key.replace("\\n", "\n").replace("\\\\n", "\n").strip()
-            
-            # Return connection with the "fixed" key passed manually
-            return st.connection("gsheets", type=GSheetsConnection, private_key=cleaned_key)
-        return st.connection("gsheets", type=GSheetsConnection)
+        # Pull the raw secrets
+        s = st.secrets["connections"]["gsheets"]
+        
+        # FIX: The "Self-Healing" Key Repair
+        # This fixes the Byte 92 (\), Double Backslash (\\n), and Padding errors
+        raw_key = s["private_key"]
+        cleaned_key = raw_key.replace("\\n", "\n").replace("\\\\n", "\n").strip()
+        
+        # Build credentials dictionary manually
+        creds_dict = {
+            "type": s["type"],
+            "project_id": s["project_id"],
+            "private_key_id": s["private_key_id"],
+            "private_key": cleaned_key,
+            "client_email": s["client_email"],
+            "client_id": s["client_id"],
+            "auth_uri": s["auth_uri"],
+            "token_uri": s["token_uri"],
+            "auth_provider_x509_cert_url": s["auth_provider_x509_cert_url"],
+            "client_x509_cert_url": s["client_x509_cert_url"]
+        }
+        
+        scopes = ["https://www.googleapis.com", "https://www.googleapis.com"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        return gspread.authorize(creds)
     except Exception as e:
-        st.error(f"❌ SECRETS ERROR: {e}")
+        st.error(f"❌ CONNECTION ERROR: {e}")
         st.stop()
 
-conn = get_safe_connection()
+# Initialize Client and Spreadsheet
+client = get_gspread_client()
+# Use your specific Spreadsheet ID from the URL
+SHEET_ID = "1LS2b2CIVSReYgoyMuPhYqKjQGfzKexfskxpjKve5HRU"
+sh = client.open_by_key(SHEET_ID)
 
 def load_sheet(name):
     try:
-        df = conn.read(worksheet=name, ttl=0)
-        return df if not df.empty else pd.DataFrame()
+        worksheet = sh.worksheet(name)
+        return pd.DataFrame(worksheet.get_all_records())
     except: return pd.DataFrame()
 
 def save_to_sheet(df, name):
     try:
+        worksheet = sh.worksheet(name)
+        worksheet.clear()
+        # Ensure IDs stay as strings
         if 'id' in df.columns: df['id'] = df['id'].astype(str)
-        conn.update(worksheet=name, data=df)
+        worksheet.update([df.columns.values.tolist()] + df.values.tolist())
         return True
     except Exception as e:
         st.error(f"❌ Cloud Sync Failed: {e}")
@@ -43,12 +65,9 @@ st.set_page_config(page_title="Arnav Social Cloud", layout="wide")
 def hash_pass(p): return hashlib.sha256(str.encode(p)).hexdigest()
 
 if "auth" not in st.session_state:
-    st.session_state.update({
-        "auth": False, "username": None, "uid": None, 
-        "role": "Guest", "all_roles": [], "active_tab": "🏠 Feed"
-    })
+    st.session_state.update({"auth": False, "username": None, "uid": None, "role": "Guest", "all_roles": [], "active_tab": "🏠 Feed"})
 
-# Load Data
+# Load Global Data
 users_df = load_sheet("Users")
 social_df = load_sheet("Social")
 follow_df = load_sheet("Followers")
@@ -68,25 +87,13 @@ if not st.session_state.auth:
         r_pass = st.text_input("Password:", type="password")
         if st.button("Register"):
             if not users_df.empty and str(r_id) in users_df['id'].astype(str).values: st.error("❌ ID exists!")
-            else:
+            elif r_id and r_name:
                 valid = (r_role=="Admin" and r_key=="6419A") or (r_role=="Me" and r_key=="6419C") or (r_role=="Guest")
-                if valid and r_id and r_name:
+                if valid:
                     u_roles = "Admin,Me,Guest" if r_role=="Admin" else f"{r_role},Guest"
                     new_u = pd.DataFrame([{"id":str(r_id), "name":r_name, "password":hash_pass(r_pass), "roles":u_roles}])
                     save_to_sheet(pd.concat([users_df, new_u], ignore_index=True) if not users_df.empty else new_u, "Users")
-                    st.success("✅ Registered! Switch to Login.")
-
-    with t3:
-        st.subheader("🔧 Recovery / Delete")
-        c_id = st.text_input("ID:", key="c_id")
-        c_p = st.text_input("Pass:", type="password", key="c_p")
-        confirm_del = st.checkbox("🗑️ DELETE ACCOUNT")
-        if st.button("Apply"):
-            if not users_df.empty and str(c_id) in users_df['id'].astype(str).values:
-                idx = users_df.index[users_df['id'].astype(str) == str(c_id)]
-                if users_df.at[idx.tolist()[0], 'password'] == hash_pass(c_p):
-                    if confirm_del:
-                        save_to_sheet(users_df.drop(idx), "Users"); st.warning("Deleted!"); st.rerun()
+                    st.success("✅ Registered! Switch to Login."); st.rerun()
 
     with t1:
         l_id = st.text_input("Enter ID:", key="l_id")
@@ -95,28 +102,22 @@ if not st.session_state.auth:
             if not users_df.empty:
                 u = users_df[(users_df['id'].astype(str) == str(l_id)) & (users_df['password'] == hash_pass(l_p))]
                 if not u.empty:
-                    u_data = u.iloc[0]
-                    st.session_state.update({
-                        "auth": True, "username": u_data['name'], "uid": str(l_id), 
-                        "role": u_data['roles'].split(",")[0], "all_roles": u_data['roles'].split(",")
-                    })
+                    st.session_state.update({"auth": True, "username": u.iloc[0]['name'], "uid": str(l_id), "all_roles": u.iloc[0]['roles'].split(",")})
                     st.rerun()
             st.error("❌ Login Failed.")
     st.stop()
 
-# --- 4. SIDEBAR (PROFILE & SWITCHER) ---
+# --- 4. SIDEBAR & SOCIAL FEATURES ---
 with st.sidebar:
     st.title(f"👤 {st.session_state.username}")
     f_count = len(follow_df[follow_df['followed_id'].astype(str) == st.session_state.uid]) if not follow_df.empty else 0
     st.metric("Followers", f_count)
     st.divider()
-    st.session_state.role = st.selectbox("🔄 Mode", st.session_state.all_roles)
-    st.session_state.active_tab = st.radio("Navigate", ["🏠 Feed", "📤 Dashboard", "🔍 Find People", "📩 Messenger"])
+    st.session_state.active_tab = st.radio("Navigate", ["🏠 Feed", "🔍 Find People", "📩 Messenger"])
     if st.button("Logout"): st.session_state.auth = False; st.rerun()
 
-# --- 5. SOCIAL FEATURES ---
 if st.session_state.active_tab == "🏠 Feed":
-    st.header("🌎 Global Feed")
+    st.header("🌎 Social Feed")
     if not posts_df.empty:
         for _, p in posts_df.iloc[::-1].iterrows():
             with st.container(border=True):
@@ -126,30 +127,3 @@ if st.session_state.active_tab == "🏠 Feed":
                 if st.button(f"❤️ {l_count} Likes", key=f"lk_{p['post_id']}"):
                     new_l = pd.DataFrame([{"post_id":p['post_id'], "type":"like", "user":st.session_state.username, "content":""}])
                     save_to_sheet(pd.concat([social_df, new_l], ignore_index=True), "Social"); st.rerun()
-
-elif st.session_state.active_tab == "🔍 Find People":
-    st.header("🔍 Find People")
-    for _, r in users_df.iterrows():
-        if str(r['id']) != st.session_state.uid:
-            c1, c2 = st.columns([3, 1])
-            c1.write(f"**{r['name']}**")
-            is_f = not follow_df.empty and len(follow_df[(follow_df['follower_id'].astype(str)==st.session_state.uid) & (follow_df['followed_id'].astype(str)==str(r['id']))]) > 0
-            if c2.button("Unfollow" if is_f else "Follow", key=f"f_{r['id']}"):
-                if is_f: 
-                    follow_df = follow_df.drop(follow_df[(follow_df['follower_id'].astype(str)==st.session_state.uid) & (follow_df['followed_id'].astype(str)==str(r['id']))].index)
-                else: 
-                    follow_df = pd.concat([follow_df, pd.DataFrame([{"follower_id":st.session_state.uid, "followed_id":str(r['id'])}])])
-                save_to_sheet(follow_df, "Followers"); st.rerun()
-
-elif st.session_state.active_tab == "📩 Messenger":
-    st.header("📩 Private Messenger")
-    target = st.selectbox("Select User:", [f"{r['id']} - {r['name']}" for _, r in users_df.iterrows() if str(r['id'])!=st.session_state.uid])
-    if target:
-        t_id = target.split(" - ")[0]
-        cid = "-".join(sorted([st.session_state.uid, t_id]))
-        if not msg_df.empty and 'chat_id' in msg_df.columns:
-            for _, m in msg_df[msg_df['chat_id'] == cid].iterrows(): st.caption(f"**{m['sender']}**: {m['text']}")
-        m_txt = st.text_input("Message...", key="msg_in")
-        if st.button("Send"):
-            new_m = pd.DataFrame([{"chat_id":cid, "sender":st.session_state.username, "text":m_txt}])
-            save_to_sheet(pd.concat([msg_df, new_m], ignore_index=True), "Messages"); st.rerun()
