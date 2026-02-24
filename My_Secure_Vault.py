@@ -3,20 +3,34 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import hashlib, os, datetime
 
-# --- 1. CLOUD CONNECTION & REPAIR ---
-try:
-    if "connections" in st.secrets and "gsheets" in st.secrets.connections:
-        s_dict = dict(st.secrets.connections.gsheets)
-        if "private_key" in s_dict:
-            cleaned_key = s_dict["private_key"].replace("\\n", "\n").strip()
-            st.secrets.connections.gsheets["private_key"] = cleaned_key
-    conn = st.connection("gsheets", type=GSheetsConnection)
-except Exception as e:
-    st.error("❌ Secrets Format Error. Please check your Private Key.")
-    st.stop()
+# --- 1. CLOUD CONNECTION & REPAIR ENGINE ---
+def get_safe_connection():
+    try:
+        # Check if secrets exist and clean the private_key automatically
+        if "connections" in st.secrets and "gsheets" in st.secrets.connections:
+            s_dict = dict(st.secrets.connections.gsheets)
+            if "private_key" in s_dict:
+                # Fixes the most common "InvalidPadding" and "PEM" errors
+                cleaned_key = s_dict["private_key"].replace("\\n", "\n").replace(" ", "").strip()
+                # Restore the necessary dashes if they were stripped
+                if "-----BEGINPRIVATEKEY-----" in cleaned_key:
+                    cleaned_key = cleaned_key.replace("-----BEGINPRIVATEKEY-----", "-----BEGIN PRIVATE KEY-----\n")
+                if "-----ENDPRIVATEKEY-----" in cleaned_key:
+                    cleaned_key = cleaned_key.replace("-----ENDPRIVATEKEY-----", "\n-----END PRIVATE KEY-----")
+                
+                return st.connection("gsheets", type=GSheetsConnection)
+        return st.connection("gsheets", type=GSheetsConnection)
+    except Exception as e:
+        st.error(f"❌ SECRETS ERROR: {e}")
+        st.info("👉 Check Streamlit Settings > Secrets. Ensure private_key is inside 'single quotes'.")
+        st.stop()
+
+conn = get_safe_connection()
 
 def load_sheet(name):
-    try: return conn.read(worksheet=name, ttl=0)
+    try: 
+        df = conn.read(worksheet=name, ttl=0)
+        return df if not df.empty else pd.DataFrame()
     except: return pd.DataFrame()
 
 def save_to_sheet(df, name):
@@ -51,6 +65,7 @@ if not st.session_state.auth:
     t1, t2, t3 = st.tabs(["🔓 Login", "📝 Register", "🔧 Recovery"])
     
     with t2:
+        st.subheader("Create Profile")
         r_id = st.text_input("9-Digit ID:", max_chars=9, key="reg_id")
         r_name = st.text_input("Name:", key="reg_name")
         r_role = st.selectbox("Role:", ["Admin", "Me", "Guest"], key="reg_role")
@@ -100,7 +115,7 @@ with st.sidebar:
     f_count = len(follow_df[follow_df['followed_id'].astype(str) == st.session_state.uid]) if not follow_df.empty else 0
     st.metric("Followers", f_count)
     st.divider()
-    st.session_state.role = st.selectbox("🔄 Mode", st.session_state.all_roles, index=0)
+    st.session_state.role = st.selectbox("🔄 Mode", st.session_state.all_roles)
     st.session_state.active_tab = st.radio("Navigate", ["🏠 Feed", "📤 Dashboard", "🔍 Find People", "📩 Messenger"])
     if st.button("Logout"): st.session_state.auth = False; st.rerun()
 
@@ -113,13 +128,13 @@ if st.session_state.active_tab == "🏠 Feed":
                 st.subheader(f"👤 {p['uploader']}")
                 st.write(f"📁 {p['name']}")
                 
-                # Likes Logic
+                # Likes
                 l_count = len(social_df[(social_df['post_id']==p['post_id']) & (social_df['type']=='like')]) if not social_df.empty else 0
                 if st.button(f"❤️ {l_count} Likes", key=f"lk_{p['post_id']}"):
                     new_l = pd.DataFrame([{"post_id":p['post_id'], "type":"like", "user":st.session_state.username, "content":""}])
                     save_to_sheet(pd.concat([social_df, new_l], ignore_index=True), "Social"); st.rerun()
                 
-                # Comments Logic
+                # Comments
                 with st.expander("💬 View Comments"):
                     if not social_df.empty:
                         for _, c in social_df[(social_df['post_id']==p['post_id']) & (social_df['type']=='comment')].iterrows():
@@ -144,7 +159,7 @@ elif st.session_state.active_tab == "🔍 Find People":
                 save_to_sheet(follow_df, "Followers"); st.rerun()
 
 elif st.session_state.active_tab == "📩 Messenger":
-    st.header("📩 Private Messenger")
+    st.header("📩 Messenger")
     target = st.selectbox("Select User:", [f"{r['id']} - {r['name']}" for _, r in users_df.iterrows() if str(r['id'])!=st.session_state.uid])
     if target:
         t_id = target.split(" - ")[0]
@@ -157,7 +172,7 @@ elif st.session_state.active_tab == "📩 Messenger":
             save_to_sheet(pd.concat([msg_df, new_m], ignore_index=True), "Messages"); st.rerun()
 
 elif st.session_state.active_tab == "📤 Dashboard":
-    st.header("📤 My Dashboard")
+    st.header("📤 Dashboard")
     if st.session_state.role in ["Admin", "Me"]:
         up = st.file_uploader("Upload", type=["png", "jpg", "mp4"])
         if up and st.button("Post Now"):
