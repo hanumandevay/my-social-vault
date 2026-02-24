@@ -3,26 +3,30 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import hashlib, os, datetime
 
-# --- 1. CLOUD CONNECTION & REPAIR ENGINE ---
+# --- 1. CLOUD CONNECTION & SELF-HEALING ENGINE ---
 def get_safe_connection():
     try:
         # Check if secrets exist and clean the private_key automatically
         if "connections" in st.secrets and "gsheets" in st.secrets.connections:
             s_dict = dict(st.secrets.connections.gsheets)
             if "private_key" in s_dict:
-                # Fixes the most common "InvalidPadding" and "PEM" errors
-                cleaned_key = s_dict["private_key"].replace("\\n", "\n").replace(" ", "").strip()
-                # Restore the necessary dashes if they were stripped
-                if "-----BEGINPRIVATEKEY-----" in cleaned_key:
-                    cleaned_key = cleaned_key.replace("-----BEGINPRIVATEKEY-----", "-----BEGIN PRIVATE KEY-----\n")
-                if "-----ENDPRIVATEKEY-----" in cleaned_key:
-                    cleaned_key = cleaned_key.replace("-----ENDPRIVATEKEY-----", "\n-----END PRIVATE KEY-----")
+                # FIXES: Byte 92 (\), Double Backslashes (\\n), and Padding errors
+                raw_key = s_dict["private_key"]
+                # Convert literal \n strings into real newlines
+                cleaned_key = raw_key.replace("\\n", "\n").replace("\\\\n", "\n").strip()
                 
-                return st.connection("gsheets", type=GSheetsConnection)
+                # Final check to ensure it starts/ends with the correct PEM headers
+                if not cleaned_key.startswith("-----BEGIN"):
+                    cleaned_key = "-----BEGIN PRIVATE KEY-----\n" + cleaned_key
+                if not cleaned_key.endswith("-----END PRIVATE KEY-----"):
+                    cleaned_key = cleaned_key + "\n-----END PRIVATE KEY-----"
+                
+                # Connect with the repaired key
+                return st.connection("gsheets", type=GSheetsConnection, private_key=cleaned_key)
         return st.connection("gsheets", type=GSheetsConnection)
     except Exception as e:
         st.error(f"❌ SECRETS ERROR: {e}")
-        st.info("👉 Check Streamlit Settings > Secrets. Ensure private_key is inside 'single quotes'.")
+        st.info("💡 FIX: Go to Streamlit Secrets. Wrap your private_key in 'single quotes'.")
         st.stop()
 
 conn = get_safe_connection()
@@ -39,7 +43,7 @@ def save_to_sheet(df, name):
         conn.update(worksheet=name, data=df)
         return True
     except Exception as e:
-        st.error(f"❌ Cloud Sync Failed: {e}")
+        st.error(f"❌ Cloud Sync Failed for {name}: {e}")
         return False
 
 # --- 2. CONFIG & STATE ---
@@ -52,7 +56,7 @@ if "auth" not in st.session_state:
         "role": "Guest", "all_roles": [], "active_tab": "🏠 Feed"
     })
 
-# Load Global Data
+# Load Global Data (Social/Users/Followers)
 users_df = load_sheet("Users")
 social_df = load_sheet("Social")
 follow_df = load_sheet("Followers")
@@ -62,7 +66,7 @@ posts_df = load_sheet("Posts")
 # --- 3. AUTHENTICATION & RECOVERY ---
 if not st.session_state.auth:
     st.title("🛡️ Arnav Secure Social")
-    t1, t2, t3 = st.tabs(["🔓 Login", "📝 Register", "🔧 Recovery"])
+    t1, t2, t3 = st.tabs(["🔓 Login", "📝 Register", "🔧 Recovery & Delete"])
     
     with t2:
         st.subheader("Create Profile")
