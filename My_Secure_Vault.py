@@ -3,30 +3,16 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 import hashlib, os, datetime
 
-# --- 1. CLOUD CONNECTION & SELF-HEALING ENGINE ---
+# --- 1. CLOUD CONNECTION & REPAIR ENGINE ---
 def get_safe_connection():
     try:
-        # Check if secrets exist and clean the private_key automatically
         if "connections" in st.secrets and "gsheets" in st.secrets.connections:
-            s_dict = dict(st.secrets.connections.gsheets)
-            if "private_key" in s_dict:
-                # FIXES: Byte 92 (\), Double Backslashes (\\n), and Padding errors
-                raw_key = s_dict["private_key"]
-                # Convert literal \n strings into real newlines
-                cleaned_key = raw_key.replace("\\n", "\n").replace("\\\\n", "\n").strip()
-                
-                # Final check to ensure it starts/ends with the correct PEM headers
-                if not cleaned_key.startswith("-----BEGIN"):
-                    cleaned_key = "-----BEGIN PRIVATE KEY-----\n" + cleaned_key
-                if not cleaned_key.endswith("-----END PRIVATE KEY-----"):
-                    cleaned_key = cleaned_key + "\n-----END PRIVATE KEY-----"
-                
-                # Connect with the repaired key
-                return st.connection("gsheets", type=GSheetsConnection, private_key=cleaned_key)
+            raw_key = st.secrets.connections.gsheets["private_key"]
+            cleaned_key = raw_key.replace("\\n", "\n").replace("\\\\n", "\n").strip()
+            st.secrets.connections.gsheets["private_key"] = cleaned_key
         return st.connection("gsheets", type=GSheetsConnection)
     except Exception as e:
         st.error(f"❌ SECRETS ERROR: {e}")
-        st.info("💡 FIX: Go to Streamlit Secrets. Wrap your private_key in 'single quotes'.")
         st.stop()
 
 conn = get_safe_connection()
@@ -43,7 +29,7 @@ def save_to_sheet(df, name):
         conn.update(worksheet=name, data=df)
         return True
     except Exception as e:
-        st.error(f"❌ Cloud Sync Failed for {name}: {e}")
+        st.error(f"❌ Cloud Sync Failed: {e}")
         return False
 
 # --- 2. CONFIG & STATE ---
@@ -56,7 +42,7 @@ if "auth" not in st.session_state:
         "role": "Guest", "all_roles": [], "active_tab": "🏠 Feed"
     })
 
-# Load Global Data (Social/Users/Followers)
+# Load Global Data
 users_df = load_sheet("Users")
 social_df = load_sheet("Social")
 follow_df = load_sheet("Followers")
@@ -66,10 +52,9 @@ posts_df = load_sheet("Posts")
 # --- 3. AUTHENTICATION & RECOVERY ---
 if not st.session_state.auth:
     st.title("🛡️ Arnav Secure Social")
-    t1, t2, t3 = st.tabs(["🔓 Login", "📝 Register", "🔧 Recovery & Delete"])
+    t1, t2, t3 = st.tabs(["🔓 Login", "📝 Register", "🔧 Recovery"])
     
     with t2:
-        st.subheader("Create Profile")
         r_id = st.text_input("9-Digit ID:", max_chars=9, key="reg_id")
         r_name = st.text_input("Name:", key="reg_name")
         r_role = st.selectbox("Role:", ["Admin", "Me", "Guest"], key="reg_role")
@@ -116,10 +101,11 @@ if not st.session_state.auth:
 # --- 4. SIDEBAR ---
 with st.sidebar:
     st.title(f"👤 {st.session_state.username}")
+    # Follower Count logic
     f_count = len(follow_df[follow_df['followed_id'].astype(str) == st.session_state.uid]) if not follow_df.empty else 0
     st.metric("Followers", f_count)
     st.divider()
-    st.session_state.role = st.selectbox("🔄 Mode", st.session_state.all_roles)
+    st.session_state.role = st.selectbox("🔄 Mode", st.session_state.all_roles, index=0)
     st.session_state.active_tab = st.radio("Navigate", ["🏠 Feed", "📤 Dashboard", "🔍 Find People", "📩 Messenger"])
     if st.button("Logout"): st.session_state.auth = False; st.rerun()
 
@@ -132,16 +118,17 @@ if st.session_state.active_tab == "🏠 Feed":
                 st.subheader(f"👤 {p['uploader']}")
                 st.write(f"📁 {p['name']}")
                 
-                # Likes
+                # Likes Logic
                 l_count = len(social_df[(social_df['post_id']==p['post_id']) & (social_df['type']=='like')]) if not social_df.empty else 0
                 if st.button(f"❤️ {l_count} Likes", key=f"lk_{p['post_id']}"):
                     new_l = pd.DataFrame([{"post_id":p['post_id'], "type":"like", "user":st.session_state.username, "content":""}])
                     save_to_sheet(pd.concat([social_df, new_l], ignore_index=True), "Social"); st.rerun()
                 
-                # Comments
+                # Comments Logic
                 with st.expander("💬 View Comments"):
                     if not social_df.empty:
-                        for _, c in social_df[(social_df['post_id']==p['post_id']) & (social_df['type']=='comment')].iterrows():
+                        post_comments = social_df[(social_df['post_id']==p['post_id']) & (social_df['type']=='comment')]
+                        for _, c in post_comments.iterrows():
                             st.caption(f"**{c['user']}**: {c['content']}")
                     c_in = st.text_input("Comment...", key=f"ci_{p['post_id']}")
                     if st.button("Post", key=f"cb_{p['post_id']}"):
@@ -163,7 +150,7 @@ elif st.session_state.active_tab == "🔍 Find People":
                 save_to_sheet(follow_df, "Followers"); st.rerun()
 
 elif st.session_state.active_tab == "📩 Messenger":
-    st.header("📩 Messenger")
+    st.header("📩 Private Messenger")
     target = st.selectbox("Select User:", [f"{r['id']} - {r['name']}" for _, r in users_df.iterrows() if str(r['id'])!=st.session_state.uid])
     if target:
         t_id = target.split(" - ")[0]
